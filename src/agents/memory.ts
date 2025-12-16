@@ -1,4 +1,4 @@
-// Simple in-memory conversation storage
+// Project-scoped conversation storage
 export interface Message {
     role: 'user' | 'assistant';
     content: string;
@@ -6,6 +6,7 @@ export interface Message {
 }
 
 export interface AgentMemory {
+    projectId: string;
     agentId: string;
     conversationHistory: Message[];
     lastInteraction: number;
@@ -13,6 +14,11 @@ export interface AgentMemory {
 
 const MEMORY_KEY = 'ai-town-memories';
 const MAX_MESSAGES_PER_AGENT = 20;
+
+// Create a composite key for project+agent
+function createKey(projectId: string, agentId: string): string {
+    return `${projectId}:${agentId}`;
+}
 
 class MemoryStore {
     private memories: Map<string, AgentMemory> = new Map();
@@ -51,19 +57,23 @@ class MemoryStore {
         }
     }
 
-    getMemory(agentId: string): AgentMemory {
-        if (!this.memories.has(agentId)) {
-            this.memories.set(agentId, {
+    // Get or create memory for a project+agent combination
+    getMemory(projectId: string, agentId: string): AgentMemory {
+        const key = createKey(projectId, agentId);
+        if (!this.memories.has(key)) {
+            this.memories.set(key, {
+                projectId,
                 agentId,
                 conversationHistory: [],
                 lastInteraction: Date.now(),
             });
         }
-        return this.memories.get(agentId)!;
+        return this.memories.get(key)!;
     }
 
-    addMessage(agentId: string, message: Message): void {
-        const memory = this.getMemory(agentId);
+    // Add a message to the conversation
+    addMessage(projectId: string, agentId: string, message: Message): void {
+        const memory = this.getMemory(projectId, agentId);
         memory.conversationHistory.push(message);
         memory.lastInteraction = Date.now();
 
@@ -75,18 +85,48 @@ class MemoryStore {
         this.saveToStorage();
     }
 
-    getConversationHistory(agentId: string): Message[] {
-        return this.getMemory(agentId).conversationHistory;
+    // Get conversation history for a project+agent
+    getConversationHistory(projectId: string, agentId: string): Message[] {
+        return this.getMemory(projectId, agentId).conversationHistory;
     }
 
-    clearMemory(agentId: string): void {
-        this.memories.delete(agentId);
+    // Clear memory for a specific project+agent
+    clearMemory(projectId: string, agentId: string): void {
+        const key = createKey(projectId, agentId);
+        this.memories.delete(key);
         this.saveToStorage();
     }
 
+    // Clear all memories for a project
+    clearProjectMemories(projectId: string): void {
+        const keysToDelete: string[] = [];
+        this.memories.forEach((_, key) => {
+            if (key.startsWith(`${projectId}:`)) {
+                keysToDelete.push(key);
+            }
+        });
+        keysToDelete.forEach(key => this.memories.delete(key));
+        this.saveToStorage();
+    }
+
+    // Clear all memories
     clearAll(): void {
         this.memories.clear();
         this.saveToStorage();
+    }
+
+    // Legacy support: Get memory with just agentId (uses 'default' project)
+    // This maintains backward compatibility
+    getLegacyMemory(agentId: string): AgentMemory {
+        return this.getMemory('default', agentId);
+    }
+
+    addLegacyMessage(agentId: string, message: Message): void {
+        this.addMessage('default', agentId, message);
+    }
+
+    getLegacyConversationHistory(agentId: string): Message[] {
+        return this.getConversationHistory('default', agentId);
     }
 }
 

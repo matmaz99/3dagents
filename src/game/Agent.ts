@@ -1,8 +1,9 @@
 // AI Agent character class
 import Phaser from 'phaser';
 import { AgentPersonality } from '../agents/personalities';
+import { Navigation } from './Navigation';
 
-export type AgentState = 'idle' | 'walking' | 'talking' | 'working';
+export type AgentState = 'idle' | 'walking' | 'talking' | 'working' | 'consulting';
 
 export class Agent extends Phaser.Physics.Arcade.Sprite {
     public agentId: string;
@@ -17,6 +18,11 @@ export class Agent extends Phaser.Physics.Arcade.Sprite {
     private stateIndicator!: Phaser.GameObjects.Text;
     private homePosition: { x: number; y: number };
     private isReturningHome: boolean = false;
+    private walkTarget: { x: number; y: number } | null = null;
+    private onArriveCallback: (() => void) | null = null;
+    private currentPath: { x: number; y: number }[] = [];
+    private currentPathIndex: number = 0;
+    private navigation: Navigation | null = null;
 
     constructor(scene: Phaser.Scene, x: number, y: number, personality: AgentPersonality) {
         super(scene, x, y, 'agent');
@@ -90,6 +96,11 @@ export class Agent extends Phaser.Physics.Arcade.Sprite {
             this.setVelocity(0, 0);
             this.stateIndicator.setText('💻');
             this.workTimer = Phaser.Math.Between(8000, 15000);
+        } else if (newState === 'consulting') {
+            this.setVelocity(0, 0);
+            this.stateIndicator.setText('🤔');
+        } else if (newState === 'walking') {
+            this.stateIndicator.setText('🚶');
         } else {
             this.stateIndicator.setText('');
         }
@@ -99,6 +110,45 @@ export class Agent extends Phaser.Physics.Arcade.Sprite {
         return this.agentState;
     }
 
+    // Set navigation system reference
+    setNavigation(nav: Navigation): void {
+        this.navigation = nav;
+    }
+
+    // Walk to a target position using pathfinding
+    walkTo(targetX: number, targetY: number, onArrive?: () => void): void {
+        this.walkTarget = { x: targetX, y: targetY };
+        this.onArriveCallback = onArrive || null;
+        this.stateIndicator.setText('🚶');
+
+        // Disable collision with furniture while walking (agent passes through)
+        const body = this.body as Phaser.Physics.Arcade.Body;
+        if (body) {
+            body.checkCollision.none = true;
+        }
+
+        if (this.navigation) {
+            // Use pathfinding
+            this.navigation.findPath(this.x, this.y, targetX, targetY, (path) => {
+                if (path && path.length > 0) {
+                    this.currentPath = path;
+                    this.currentPathIndex = 0;
+                    this.agentState = 'walking';
+                } else {
+                    // No path found, try direct movement
+                    this.currentPath = [{ x: targetX, y: targetY }];
+                    this.currentPathIndex = 0;
+                    this.agentState = 'walking';
+                }
+            });
+        } else {
+            // No navigation, direct path
+            this.currentPath = [{ x: targetX, y: targetY }];
+            this.currentPathIndex = 0;
+            this.agentState = 'walking';
+        }
+    }
+
     update(time: number, delta: number): void {
         // Update label positions
         this.nameText.setPosition(this.x, this.y - 25);
@@ -106,13 +156,13 @@ export class Agent extends Phaser.Physics.Arcade.Sprite {
 
         // Don't move while talking
         if (this.agentState === 'talking') {
+            this.setVelocity(0, 0);
             return;
         }
 
         // Working at desk - stay stationary
         if (this.agentState === 'working') {
             this.setVelocity(0, 0);
-            // Agents stay at their desk working - no random movement
             return;
         }
 
@@ -122,35 +172,80 @@ export class Agent extends Phaser.Physics.Arcade.Sprite {
             return;
         }
 
-        // Walking state (only used when explicitly triggered, not by default)
-        if (this.agentState === 'walking') {
-            this.moveTimer -= delta;
+        // Consulting state - stay stationary (being consulted)
+        if (this.agentState === 'consulting') {
+            this.setVelocity(0, 0);
+            return;
+        }
 
-            if (this.moveTimer <= 0) {
-                // Return to working state at home position
-                this.returnToDesk();
-            } else {
-                // Keep moving
-                this.setVelocity(this.moveDirection.x * this.speed, this.moveDirection.y * this.speed);
+        // Walking state - follow path
+        if (this.agentState === 'walking') {
+            this.followPath();
+        }
+    }
+
+    // Follow the current path
+    private followPath(): void {
+        if (this.currentPath.length === 0 || this.currentPathIndex >= this.currentPath.length) {
+            // Path complete
+            this.arriveAtDestination();
+            return;
+        }
+
+        const target = this.currentPath[this.currentPathIndex];
+        const distance = Phaser.Math.Distance.Between(this.x, this.y, target.x, target.y);
+
+        if (distance < 8) {
+            // Reached current waypoint, move to next
+            this.currentPathIndex++;
+
+            if (this.currentPathIndex >= this.currentPath.length) {
+                // Reached final destination
+                this.arriveAtDestination();
             }
+        } else {
+            // Move towards current waypoint
+            const angle = Phaser.Math.Angle.Between(this.x, this.y, target.x, target.y);
+            this.setVelocity(Math.cos(angle) * this.speed, Math.sin(angle) * this.speed);
+        }
+    }
+
+    // Called when agent arrives at destination
+    private arriveAtDestination(): void {
+        this.setVelocity(0, 0);
+        this.currentPath = [];
+        this.currentPathIndex = 0;
+
+        // Re-enable collision
+        const body = this.body as Phaser.Physics.Arcade.Body;
+        if (body) {
+            body.checkCollision.none = false;
+        }
+
+        if (this.onArriveCallback) {
+            const callback = this.onArriveCallback;
+            this.onArriveCallback = null;
+            this.walkTarget = null;
+            this.setAgentState('idle');
+            callback();
+        } else if (this.isReturningHome) {
+            // Returned to desk
+            this.isReturningHome = false;
+            this.setPosition(this.homePosition.x, this.homePosition.y);
+            this.setAgentState('working');
+        } else {
+            this.setAgentState('idle');
         }
     }
 
     // Method to make agent return to their desk
-    private returnToDesk(): void {
-        const distanceToHome = Phaser.Math.Distance.Between(this.x, this.y, this.homePosition.x, this.homePosition.y);
-
-        if (distanceToHome < 10) {
-            // Close enough, snap to position and start working
-            this.setPosition(this.homePosition.x, this.homePosition.y);
+    returnToDesk(): void {
+        this.isReturningHome = true;
+        this.stateIndicator.setText('🚶');
+        this.walkTo(this.homePosition.x, this.homePosition.y, () => {
+            this.isReturningHome = false;
             this.setAgentState('working');
-        } else {
-            // Move towards home
-            this.isReturningHome = true;
-            const angle = Phaser.Math.Angle.Between(this.x, this.y, this.homePosition.x, this.homePosition.y);
-            this.setVelocity(Math.cos(angle) * this.speed, Math.sin(angle) * this.speed);
-            this.moveTimer = 100; // Small timer to keep checking
-        }
+        });
     }
 
     private chooseNewDirection(): void {
@@ -170,6 +265,21 @@ export class Agent extends Phaser.Physics.Arcade.Sprite {
 
     getDistanceToPlayer(playerX: number, playerY: number): number {
         return Phaser.Math.Distance.Between(this.x, this.y, playerX, playerY);
+    }
+
+    // Get current position
+    getPosition(): { x: number; y: number } {
+        return { x: this.x, y: this.y };
+    }
+
+    // Get home (desk) position
+    getHomePosition(): { x: number; y: number } {
+        return { ...this.homePosition };
+    }
+
+    // Set home position (for multi-space support)
+    setHomePosition(x: number, y: number): void {
+        this.homePosition = { x, y };
     }
 
     destroy(fromScene?: boolean): void {

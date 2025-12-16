@@ -47,6 +47,13 @@ export class Player extends Phaser.Physics.Arcade.Sprite {
             return;
         }
 
+        // Don't process movement if user is typing in an input field
+        const activeElement = document.activeElement;
+        if (activeElement && (activeElement.tagName === 'INPUT' || activeElement.tagName === 'TEXTAREA')) {
+            this.setVelocity(0, 0);
+            return;
+        }
+
         const velocity = { x: 0, y: 0 };
 
         // Horizontal movement

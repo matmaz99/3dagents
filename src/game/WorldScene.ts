@@ -1,14 +1,29 @@
 // Main game world scene
 import Phaser from 'phaser';
 import { Player } from './Player';
-import { Agent } from './Agent';
+import { Agent, AgentState } from './Agent';
 import { AGENT_PERSONALITIES } from '../agents/personalities';
+import { Navigation } from './Navigation';
+import { ThoughtBubbleManager } from './ThoughtBubble';
+import { SpaceManager, ProjectSpace } from './SpaceManager';
+import { CameraController } from './CameraController';
+import { Project, SPACE_WIDTH, SPACE_HEIGHT, SPACE_GAP, gridToWorldPosition } from '@/types/project';
 
 // Event types for communication with React
 export interface GameEvents {
     onNearAgent: (agentId: string, distance: number) => void;
     onLeaveAgent: () => void;
     onInteractRequest: (agentId: string) => void;
+    onEnterCallStation: () => void;
+    onLeaveCallStation: () => void;
+    onAgentArrived: (agentId: string) => void;
+    // New events for tool call visualization
+    onAgentStartedWalking?: (agentId: string, targetAgentId: string) => void;
+    onAgentArrivedAtAgent?: (agentId: string, targetAgentId: string) => void;
+    onAgentStartedReturning?: (agentId: string) => void;
+    // Multi-space events
+    onSpaceChanged?: (projectId: string | null) => void;
+    onZoomChanged?: (zoom: number) => void;
 }
 
 export class WorldScene extends Phaser.Scene {
@@ -19,12 +34,26 @@ export class WorldScene extends Phaser.Scene {
     private interactKey!: Phaser.Input.Keyboard.Key;
     private isPlayerInteracting: boolean = false;
     private furniture!: Phaser.Physics.Arcade.StaticGroup;
+    private isAtCallStation: boolean = false;
+    private summonedAgent: Agent | null = null;
+    private navigation!: Navigation;
+    private thoughtBubbleManager!: ThoughtBubbleManager;
 
-    // World configuration
+    // Multi-space support
+    private spaceManager!: SpaceManager;
+    private cameraController!: CameraController;
+    private projects: Project[] = [];
+    private activeProjectId: string | null = null;
+    private isMultiSpaceMode: boolean = false;
+
+    // World configuration (for single-space backward compatibility)
     private readonly WORLD_WIDTH = 1000;
     private readonly WORLD_HEIGHT = 700;
     private readonly INTERACTION_DISTANCE = 60;
     private readonly TILE_SIZE = 32;
+    private readonly NAV_TILE_SIZE = 16; // Smaller tiles for better pathfinding
+    private readonly CALL_STATION = { x: 550, y: 500 };
+    private readonly CALL_STATION_RADIUS = 50;
 
     constructor() {
         super({ key: 'WorldScene' });
@@ -34,16 +63,148 @@ export class WorldScene extends Phaser.Scene {
         this.gameEvents = events;
     }
 
+    // === PROJECT MANAGEMENT METHODS ===
+
+    // Set projects for multi-space mode
+    setProjects(projects: Project[]): void {
+        this.projects = projects;
+        this.isMultiSpaceMode = projects.length > 0;
+
+        if (this.isMultiSpaceMode && this.spaceManager) {
+            // Create spaces for each project
+            projects.forEach(project => {
+                if (!this.spaceManager.getSpace(project.id)) {
+                    const space = this.spaceManager.createSpace(project);
+                    // Add collision between player and furniture
+                    if (this.player) {
+                        this.physics.add.collider(this.player, space.furniture);
+                    }
+                    // Add collision between agents
+                    space.agents.forEach((agent, i) => {
+                        space.agents.slice(i + 1).forEach(otherAgent => {
+                            this.physics.add.collider(agent, otherAgent);
+                        });
+                        if (this.player) {
+                            this.physics.add.collider(this.player, agent);
+                        }
+                    });
+                }
+            });
+
+            // Update world bounds
+            const bounds = this.spaceManager.getWorldBounds();
+            this.physics.world.setBounds(0, 0, bounds.width, bounds.height);
+            this.cameraController?.setBounds(bounds.width, bounds.height);
+
+            // Collect all agents from spaces
+            this.agents = [];
+            this.spaceManager.getAllSpaces().forEach(space => {
+                this.agents.push(...space.agents);
+            });
+        }
+    }
+
+    // Add a single project
+    addProject(project: Project): void {
+        if (!this.projects.find(p => p.id === project.id)) {
+            this.projects.push(project);
+            this.setProjects(this.projects);
+        }
+    }
+
+    // Remove a project
+    removeProject(projectId: string): void {
+        this.projects = this.projects.filter(p => p.id !== projectId);
+        this.spaceManager?.removeSpace(projectId);
+
+        // Rebuild agents list
+        this.agents = [];
+        this.spaceManager?.getAllSpaces().forEach(space => {
+            this.agents.push(...space.agents);
+        });
+    }
+
+    // Set active project (camera focuses on it)
+    setActiveProject(projectId: string | null): void {
+        this.activeProjectId = projectId;
+
+        if (projectId && this.isMultiSpaceMode) {
+            const space = this.spaceManager?.getSpace(projectId);
+            if (space) {
+                this.cameraController?.focusOnGridPosition(space.project.gridPosition);
+            }
+        }
+
+        this.gameEvents?.onSpaceChanged?.(projectId);
+    }
+
+    // Get active project ID
+    getActiveProjectId(): string | null {
+        return this.activeProjectId;
+    }
+
+    // Focus camera on a project space
+    focusOnProject(projectId: string): void {
+        const space = this.spaceManager?.getSpace(projectId);
+        if (space) {
+            this.cameraController?.focusOnGridPosition(space.project.gridPosition);
+            this.activeProjectId = projectId;
+            this.gameEvents?.onSpaceChanged?.(projectId);
+        }
+    }
+
+    // Zoom out to see all spaces
+    zoomOutToOverview(): void {
+        this.cameraController?.zoomOut();
+    }
+
+    // Zoom in to focused space
+    zoomInToSpace(): void {
+        this.cameraController?.zoomIn();
+    }
+
     setPlayerInteracting(value: boolean): void {
         this.isPlayerInteracting = value;
         if (this.player) {
             this.player.setInteracting(value);
         }
 
-        // Set relevant agent to talking state
+        // Set relevant agent to talking state or return to desk
         if (this.nearestAgent) {
-            this.nearestAgent.setAgentState(value ? 'talking' : 'working');
+            if (value) {
+                this.nearestAgent.setAgentState('talking');
+            } else {
+                // Conversation ended - agent returns to their desk
+                this.nearestAgent.returnToDesk();
+            }
         }
+
+        // Handle summoned agent returning to desk
+        if (!value && this.summonedAgent) {
+            if (this.summonedAgent !== this.nearestAgent) {
+                this.summonedAgent.returnToDesk();
+            }
+            this.summonedAgent = null;
+        }
+    }
+
+    // Summon an agent to come to the player
+    summonAgent(agentId: string): void {
+        const agent = this.agents.find(a => a.agentId === agentId);
+        if (!agent) return;
+
+        this.summonedAgent = agent;
+        const playerPos = this.player.getPosition();
+
+        // Calculate position in front of player (offset by interaction distance)
+        const targetX = playerPos.x;
+        const targetY = playerPos.y - 40; // Position in front of player
+
+        agent.walkTo(targetX, targetY, () => {
+            // Agent has arrived - set as nearest agent for proper return logic
+            this.nearestAgent = agent;
+            this.gameEvents?.onAgentArrived(agentId);
+        });
     }
 
     preload(): void {
@@ -240,10 +401,101 @@ export class WorldScene extends Phaser.Scene {
     }
 
     create(): void {
+        // Initialize space manager for multi-space support
+        this.spaceManager = new SpaceManager(this);
+        this.spaceManager.createTextures();
+
+        // Initialize camera controller
+        this.cameraController = new CameraController(this);
+        this.cameraController.onZoomChange = (zoom) => {
+            this.gameEvents?.onZoomChanged?.(zoom);
+        };
+        this.cameraController.onSpaceFocus = (gridPos) => {
+            if (gridPos) {
+                // Find project at this grid position
+                const space = this.spaceManager.getAllSpaces().find(
+                    s => s.project.gridPosition.row === gridPos.row &&
+                        s.project.gridPosition.col === gridPos.col
+                );
+                if (space) {
+                    this.activeProjectId = space.projectId;
+                    this.gameEvents?.onSpaceChanged?.(space.projectId);
+                }
+            }
+        };
+
+        // Initialize thought bubble manager
+        this.thoughtBubbleManager = new ThoughtBubbleManager(this);
+
+        // Set up interaction key
+        if (this.input.keyboard) {
+            this.interactKey = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.E);
+            // Disable global keyboard capture so input fields work normally
+            this.input.keyboard.disableGlobalCapture();
+        }
+
+        // If projects were set before create(), initialize multi-space mode
+        // Otherwise, create the legacy single-office environment
+        if (this.projects.length > 0) {
+            this.initializeMultiSpaceMode();
+        } else {
+            this.initializeSingleSpaceMode();
+        }
+    }
+
+    // Initialize for multi-space mode (projects)
+    private initializeMultiSpaceMode(): void {
+        this.isMultiSpaceMode = true;
+
+        // Create player at first project space
+        const firstProject = this.projects[0];
+        const worldPos = gridToWorldPosition(firstProject.gridPosition);
+        this.player = new Player(this, worldPos.x + SPACE_WIDTH / 2, worldPos.y + SPACE_HEIGHT / 2);
+
+        // Create spaces for each project
+        this.projects.forEach(project => {
+            const space = this.spaceManager.createSpace(project);
+            // Add collision between player and furniture
+            this.physics.add.collider(this.player, space.furniture);
+            // Add collision between agents
+            space.agents.forEach((agent, i) => {
+                space.agents.slice(i + 1).forEach(otherAgent => {
+                    this.physics.add.collider(agent, otherAgent);
+                });
+                this.physics.add.collider(this.player, agent);
+            });
+        });
+
+        // Collect all agents from spaces
+        this.agents = [];
+        this.spaceManager.getAllSpaces().forEach(space => {
+            this.agents.push(...space.agents);
+        });
+
+        // Update world bounds based on spaces
+        const bounds = this.spaceManager.getWorldBounds();
+        this.physics.world.setBounds(0, 0, bounds.width, bounds.height);
+        this.cameraController.setBounds(bounds.width, bounds.height);
+
+        // Focus on first project
+        if (this.projects.length > 0) {
+            this.activeProjectId = this.projects[0].id;
+            this.cameraController.focusOnGridPosition(this.projects[0].gridPosition, false);
+        }
+    }
+
+    // Initialize for single-space mode (legacy, no projects)
+    private initializeSingleSpaceMode(): void {
+        this.isMultiSpaceMode = false;
+
         // Set world bounds
         this.physics.world.setBounds(0, 0, this.WORLD_WIDTH, this.WORLD_HEIGHT);
 
-        // Create the environment
+        // Initialize navigation system
+        this.navigation = new Navigation(this.WORLD_WIDTH, this.WORLD_HEIGHT, this.NAV_TILE_SIZE);
+        this.navigation.markPerimeterWalls(this.TILE_SIZE);
+
+        // Create the environment (this also sets up navigation obstacles)
         this.createEnvironment();
 
         // Create player in center
@@ -260,17 +512,13 @@ export class WorldScene extends Phaser.Scene {
         AGENT_PERSONALITIES.forEach((personality, index) => {
             const pos = agentPositions[index];
             const agent = new Agent(this, pos.x, pos.y, personality);
+            agent.setNavigation(this.navigation);
             this.agents.push(agent);
         });
 
         // Set up camera
         this.cameras.main.setBounds(0, 0, this.WORLD_WIDTH, this.WORLD_HEIGHT);
-        this.cameras.main.startFollow(this.player, true, 0.1, 0.1);
-
-        // Set up interaction key
-        if (this.input.keyboard) {
-            this.interactKey = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.E);
-        }
+        this.cameraController.setFollowTarget(this.player);
 
         // Add collision between agents
         this.agents.forEach((agent, i) => {
@@ -374,6 +622,9 @@ export class WorldScene extends Phaser.Scene {
         this.add.image(500, 230, 'computer').setDepth(2);
         this.add.image(500, 290, 'chair').setDepth(1);
 
+        // Add call station
+        this.createCallStation();
+
         // Add title text
         this.add.text(500, 50, '🏢 AI Office', {
             fontSize: '24px',
@@ -384,39 +635,114 @@ export class WorldScene extends Phaser.Scene {
         }).setOrigin(0.5).setDepth(200);
 
         // Add controls hint
-        this.add.text(500, this.WORLD_HEIGHT - 30, 'WASD/Arrows to move • E to talk', {
+        this.add.text(500, this.WORLD_HEIGHT - 30, 'WASD/Arrows to move • E to talk • Stand on 📞 to call', {
             fontSize: '14px',
             fontFamily: 'Arial',
             color: '#888888',
         }).setOrigin(0.5).setDepth(200);
     }
 
-    // Helper to add furniture with collision
-    private addFurniture(x: number, y: number, texture: string): Phaser.Physics.Arcade.Sprite {
+    // Helper to add furniture with collision and navigation blocking
+    private addFurniture(x: number, y: number, texture: string, width?: number, height?: number): Phaser.Physics.Arcade.Sprite {
         const sprite = this.furniture.create(x, y, texture) as Phaser.Physics.Arcade.Sprite;
         sprite.setDepth(1);
         // Refresh the physics body to match the texture size
         sprite.refreshBody();
+
+        // Mark as blocked in navigation grid (minimal padding)
+        const w = width || sprite.width;
+        const h = height || sprite.height;
+        this.navigation.markBlocked(x, y, w, h);
+
         return sprite;
+    }
+
+    // Create the call station visual
+    private createCallStation(): void {
+        // Call station floor marker (circular area)
+        const callStationGraphics = this.make.graphics({ x: 0, y: 0 });
+        callStationGraphics.fillStyle(0x38a169, 0.3);
+        callStationGraphics.fillCircle(50, 50, 45);
+        callStationGraphics.lineStyle(2, 0x38a169, 0.8);
+        callStationGraphics.strokeCircle(50, 50, 45);
+        callStationGraphics.generateTexture('callStation', 100, 100);
+        callStationGraphics.destroy();
+
+        // Add call station marker to the scene
+        this.add.image(this.CALL_STATION.x, this.CALL_STATION.y, 'callStation').setDepth(0);
+
+        // Add phone icon
+        this.add.text(this.CALL_STATION.x, this.CALL_STATION.y - 10, '📞', {
+            fontSize: '24px',
+        }).setOrigin(0.5).setDepth(1);
+
+        // Add label
+        this.add.text(this.CALL_STATION.x, this.CALL_STATION.y + 25, 'Call Station', {
+            fontSize: '10px',
+            fontFamily: 'Arial',
+            color: '#38a169',
+        }).setOrigin(0.5).setDepth(1);
     }
 
     update(time: number, delta: number): void {
         // Update player
         this.player.update();
 
-        // Update agents
-        this.agents.forEach(agent => {
-            agent.update(time, delta);
-        });
+        // Update agents (both single-space and multi-space)
+        if (this.isMultiSpaceMode) {
+            this.spaceManager.update(time, delta);
+        } else {
+            this.agents.forEach(agent => {
+                agent.update(time, delta);
+            });
+        }
+
+        // Update thought bubbles (follow agents)
+        this.thoughtBubbleManager.update();
+
+        // Update camera controller
+        this.cameraController?.update();
 
         // Check proximity to agents
         this.checkAgentProximity();
+
+        // Check if player is at call station (only in single-space mode)
+        if (!this.isMultiSpaceMode) {
+            this.checkCallStation();
+        }
 
         // Check for interaction input
         if (this.interactKey && Phaser.Input.Keyboard.JustDown(this.interactKey)) {
             if (this.nearestAgent && !this.isPlayerInteracting) {
                 this.gameEvents?.onInteractRequest(this.nearestAgent.agentId);
             }
+        }
+
+        // In multi-space mode, detect which space the player is in
+        if (this.isMultiSpaceMode) {
+            const playerPos = this.player.getPosition();
+            const currentSpace = this.spaceManager.getSpaceAtPosition(playerPos.x, playerPos.y);
+            if (currentSpace && currentSpace.projectId !== this.activeProjectId) {
+                this.activeProjectId = currentSpace.projectId;
+                this.gameEvents?.onSpaceChanged?.(currentSpace.projectId);
+            }
+        }
+    }
+
+    private checkCallStation(): void {
+        const playerPos = this.player.getPosition();
+        const distanceToStation = Phaser.Math.Distance.Between(
+            playerPos.x, playerPos.y,
+            this.CALL_STATION.x, this.CALL_STATION.y
+        );
+
+        const wasAtCallStation = this.isAtCallStation;
+        this.isAtCallStation = distanceToStation < this.CALL_STATION_RADIUS;
+
+        if (this.isAtCallStation && !wasAtCallStation && !this.isPlayerInteracting) {
+            this.gameEvents?.onEnterCallStation();
+        } else if (!this.isAtCallStation && wasAtCallStation) {
+            this.gameEvents?.onLeaveCallStation();
         }
     }
 
@@ -449,5 +775,134 @@ export class WorldScene extends Phaser.Scene {
 
     getNearestAgent(): Agent | null {
         return this.nearestAgent;
+    }
+
+    // === ORCHESTRATOR METHODS ===
+
+    // Get an agent by ID
+    getAgentById(agentId: string): Agent | undefined {
+        return this.agents.find(a => a.agentId === agentId);
+    }
+
+    // Get agent position
+    getAgentPosition(agentId: string): { x: number; y: number } | null {
+        const agent = this.getAgentById(agentId);
+        return agent ? agent.getPosition() : null;
+    }
+
+    // Set agent state
+    setAgentState(agentId: string, state: AgentState): void {
+        const agent = this.getAgentById(agentId);
+        if (agent) {
+            agent.setAgentState(state);
+        }
+    }
+
+    // Walk an agent to another agent's position
+    walkAgentToAgent(walkerId: string, targetId: string): Promise<void> {
+        return new Promise((resolve) => {
+            const walker = this.getAgentById(walkerId);
+            const target = this.getAgentById(targetId);
+
+            if (!walker || !target) {
+                resolve();
+                return;
+            }
+
+            const targetPos = target.getPosition();
+
+            // Fire event
+            this.gameEvents?.onAgentStartedWalking?.(walkerId, targetId);
+
+            // Walk to near the target (offset to not overlap)
+            walker.walkTo(targetPos.x + 30, targetPos.y, () => {
+                this.gameEvents?.onAgentArrivedAtAgent?.(walkerId, targetId);
+                resolve();
+            });
+        });
+    }
+
+    // Teleport an agent instantly to another agent's position
+    teleportAgentToAgent(agentId: string, targetId: string): void {
+        const agent = this.getAgentById(agentId);
+        const target = this.getAgentById(targetId);
+
+        if (!agent || !target) {
+            return;
+        }
+
+        const targetPos = target.getPosition();
+        // Teleport next to target (offset to not overlap)
+        agent.setPosition(targetPos.x + 40, targetPos.y);
+        agent.setVelocity(0, 0);
+    }
+
+    // Return agent to their desk
+    returnAgentToDesk(agentId: string): Promise<void> {
+        return new Promise((resolve) => {
+            const agent = this.getAgentById(agentId);
+
+            if (!agent) {
+                resolve();
+                return;
+            }
+
+            this.gameEvents?.onAgentStartedReturning?.(agentId);
+
+            agent.returnToDesk();
+
+            // Wait for agent to reach desk (estimate based on distance)
+            const homePos = agent.getHomePosition();
+            const currentPos = agent.getPosition();
+            const distance = Phaser.Math.Distance.Between(
+                currentPos.x, currentPos.y,
+                homePos.x, homePos.y
+            );
+
+            // Estimate time based on agent speed (roughly 60px/s on average)
+            const estimatedTime = Math.max(500, (distance / 60) * 1000 + 200);
+
+            setTimeout(resolve, estimatedTime);
+        });
+    }
+
+    // === THOUGHT BUBBLE METHODS ===
+
+    // Show a thought bubble for an agent
+    showThoughtBubble(
+        bubbleId: string,
+        agentId: string,
+        content?: string,
+        depth: number = 0
+    ): void {
+        const agent = this.getAgentById(agentId);
+        if (agent) {
+            this.thoughtBubbleManager.createBubbleForAgent(bubbleId, agent, content, depth);
+        }
+    }
+
+    // Update thought bubble content
+    updateThoughtBubble(bubbleId: string, content: string): void {
+        this.thoughtBubbleManager.updateBubbleContent(bubbleId, content);
+    }
+
+    // Hide a thought bubble
+    hideThoughtBubble(bubbleId: string): void {
+        this.thoughtBubbleManager.removeBubble(bubbleId);
+    }
+
+    // Hide all thought bubbles
+    hideAllThoughtBubbles(): void {
+        this.thoughtBubbleManager.removeAllBubbles();
+    }
+
+    // Return all agents to their desks
+    returnAllAgentsToDesks(): void {
+        this.agents.forEach(agent => {
+            if (agent.getAgentState() !== 'working') {
+                agent.returnToDesk();
+            }
+        });
+        this.hideAllThoughtBubbles();
     }
 }
