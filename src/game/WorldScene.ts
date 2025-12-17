@@ -188,9 +188,9 @@ export class WorldScene extends Phaser.Scene {
         }
     }
 
-    // Summon an agent to come to the player
+    // Summon an agent to come to the player (scoped to active project)
     summonAgent(agentId: string): void {
-        const agent = this.agents.find(a => a.agentId === agentId);
+        const agent = this.getAgentById(agentId);
         if (!agent) return;
 
         this.summonedAgent = agent;
@@ -779,9 +779,26 @@ export class WorldScene extends Phaser.Scene {
 
     // === ORCHESTRATOR METHODS ===
 
-    // Get an agent by ID
+    // Get an agent by ID (scoped to active project in multi-space mode)
     getAgentById(agentId: string): Agent | undefined {
+        if (this.isMultiSpaceMode && this.activeProjectId) {
+            // In multi-space mode, only search within the active project's agents
+            const space = this.spaceManager?.getSpace(this.activeProjectId);
+            if (space) {
+                return space.agents.find(a => a.agentId === agentId);
+            }
+        }
+        // Fallback: search all agents (single-space mode)
         return this.agents.find(a => a.agentId === agentId);
+    }
+
+    // Get an agent by ID from a specific project
+    getAgentByIdForProject(agentId: string, projectId: string): Agent | undefined {
+        const space = this.spaceManager?.getSpace(projectId);
+        if (space) {
+            return space.agents.find(a => a.agentId === agentId);
+        }
+        return undefined;
     }
 
     // Get agent position
@@ -896,13 +913,26 @@ export class WorldScene extends Phaser.Scene {
         this.thoughtBubbleManager.removeAllBubbles();
     }
 
-    // Return all agents to their desks
+    // Return all agents to their desks (scoped to active project in multi-space mode)
     returnAllAgentsToDesks(): void {
-        this.agents.forEach(agent => {
-            if (agent.getAgentState() !== 'working') {
-                agent.returnToDesk();
+        if (this.isMultiSpaceMode && this.activeProjectId) {
+            // Only return agents in the active project's space
+            const space = this.spaceManager?.getSpace(this.activeProjectId);
+            if (space) {
+                space.agents.forEach(agent => {
+                    if (agent.getAgentState() !== 'working') {
+                        agent.returnToDesk();
+                    }
+                });
             }
-        });
+        } else {
+            // Single-space mode: return all agents
+            this.agents.forEach(agent => {
+                if (agent.getAgentState() !== 'working') {
+                    agent.returnToDesk();
+                }
+            });
+        }
         this.hideAllThoughtBubbles();
     }
 }

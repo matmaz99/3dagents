@@ -38,24 +38,27 @@ export default function Home() {
 
   // Load projects on mount
   useEffect(() => {
-    const loadProjects = () => {
-      const allProjects = projectStore.getProjects();
-      setProjects(allProjects);
+    // Initial load - set both projects and active project
+    const allProjects = projectStore.getProjects();
+    setProjects(allProjects);
 
-      // Set active project if not already set
-      const active = projectStore.getActiveProject();
-      if (active) {
-        setActiveProject(active);
-      } else if (allProjects.length > 0) {
-        setActiveProject(allProjects[0]);
-        projectStore.setActiveProject(allProjects[0].id);
-      }
+    const active = projectStore.getActiveProject();
+    if (active) {
+      setActiveProject(active);
+    } else if (allProjects.length > 0) {
+      setActiveProject(allProjects[0]);
+      projectStore.setActiveProject(allProjects[0].id);
+    }
 
-      setIsProjectsLoaded(true);
+    setIsProjectsLoaded(true);
+
+    // Subscribe ONLY updates projects list, NOT active project
+    // This prevents the subscription from overriding user selections
+    const handleStoreChange = () => {
+      setProjects(projectStore.getProjects());
     };
 
-    loadProjects();
-    const unsubscribe = projectStore.subscribe(loadProjects);
+    const unsubscribe = projectStore.subscribe(handleStoreChange);
     return unsubscribe;
   }, []);
 
@@ -81,11 +84,19 @@ export default function Home() {
   }, []);
 
   // Project management handlers
-  const handleSelectProject = useCallback((project: Project) => {
+  const handleSelectProject = (project: Project) => {
+    // Set flag to prevent game space detection from overriding this selection
+    userSelectedProjectRef.current = true;
     setActiveProject(project);
     projectStore.setActiveProject(project.id);
-    gameCanvasRef.current?.focusOnProject(project.id);
-  }, []);
+    if (gameCanvasRef.current) {
+      gameCanvasRef.current.focusOnProject(project.id);
+    }
+    // Reset flag after focus animation completes
+    setTimeout(() => {
+      userSelectedProjectRef.current = false;
+    }, 1000);
+  };
 
   const handleCreateProject = useCallback(() => {
     setShowNewProjectForm(true);
@@ -106,7 +117,14 @@ export default function Home() {
     }
   }, []);
 
+  // Track if user manually selected a project (to prevent game space detection from overriding)
+  const userSelectedProjectRef = useRef(false);
+
   const handleSpaceChanged = useCallback((projectId: string | null) => {
+    // Don't override if user just manually selected a project
+    if (userSelectedProjectRef.current) {
+      return;
+    }
     if (projectId) {
       const project = projectStore.getProject(projectId);
       if (project) {
@@ -159,7 +177,7 @@ export default function Home() {
         )}
 
         {/* Header info */}
-        <div className="absolute top-4 left-4 z-30">
+        <div className="absolute top-4 left-4 z-30 pointer-events-none">
           <h1 className="text-white text-2xl font-bold drop-shadow-lg">AI Office</h1>
           {activeProject ? (
             <div className="flex items-center gap-2 mt-1">
@@ -200,8 +218,12 @@ export default function Home() {
         </div>
       </div>
 
-      {/* Chat panel (right side) */}
-      <ChatPanel gameRef={gameCanvasRef} project={activeProject || undefined} />
+      {/* Chat panel (right side) - key forces remount on project change */}
+      <ChatPanel
+        key={activeProject?.id || 'no-project'}
+        gameRef={gameCanvasRef}
+        project={activeProject || undefined}
+      />
 
       {/* New project form modal */}
       {showNewProjectForm && (

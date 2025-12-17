@@ -6,10 +6,13 @@ import { getAgentById, getConsultableAgents } from '@/agents/personalities';
 import {
     githubToolSchema,
     clickupToolSchema,
+    browserToolSchema,
     executeGitHubTool,
     executeClickUpTool,
+    executeBrowserTool,
     GITHUB_TOOL_DESCRIPTION,
     CLICKUP_TOOL_DESCRIPTION,
+    BROWSER_TOOL_DESCRIPTION,
 } from '@/agents/externalTools';
 import { Project } from '@/types/project';
 
@@ -34,29 +37,29 @@ function generateMockResponse(agentId: string, userMessage: string): string {
     const userLower = userMessage.toLowerCase();
 
     switch (agent.id) {
-        case 'pm':
+        case 'product-owner':
             if (userLower.includes('hello') || userLower.includes('hi')) {
-                return "Hey there! I'm Alex, your project manager. I coordinate with our designer Jordan, developer Sam, and account manager Morgan. What project can I help you with?";
+                return "Hey! I'm Alex, the Product Owner. I manage the backlog, break down features into stories, and keep sprints on track. What do you need scoped or prioritized?";
             }
-            return "Let me think about how we can approach this. I might need to check with the team on specifics.";
+            return "Let me think about how we can break this down into actionable stories. I might consult with Sam on technical feasibility.";
 
-        case 'designer':
+        case 'qa-engineer':
             if (userLower.includes('hello') || userLower.includes('hi')) {
-                return "Hi! I'm Jordan, the designer. I love crafting intuitive user experiences. What design challenge can I help with?";
+                return "Hi! I'm Jordan, the QA Engineer. I track bugs, validate acceptance criteria, and make sure we ship quality code. What do you need tested?";
             }
-            return "That's an interesting design challenge. Let me think about the user experience implications.";
+            return "That's something I'll need to verify. Let me check the acceptance criteria and any related bug reports.";
 
-        case 'developer':
+        case 'tech-lead':
             if (userLower.includes('hello') || userLower.includes('hi')) {
-                return "Hey! Sam here, the dev. Full-stack is my jam. What are we building?";
+                return "Hey! Sam here, the Tech Lead. I handle architecture, code reviews, and technical decisions. What implementation challenge are we tackling?";
             }
-            return "Interesting technical challenge. Let me think through the implementation approach.";
+            return "Interesting technical challenge. Let me check the codebase and think through the implementation approach.";
 
-        case 'account-manager':
+        case 'release-manager':
             if (userLower.includes('hello') || userLower.includes('hi')) {
-                return "Hello! I'm Morgan, the account manager. I'm here to make sure we deliver real value. What's on your mind?";
+                return "Hello! I'm Morgan, the Release Manager. I handle deployments, release notes, and making sure everything gets to production smoothly. What release info do you need?";
             }
-            return "I understand. Let me think about how this aligns with our goals and what the team can deliver.";
+            return "Let me check the deployment status and recent commits to give you an update.";
 
         default:
             return "Hmm, let me think about that...";
@@ -206,6 +209,8 @@ export async function POST(request: NextRequest) {
         if (project?.clickup) {
             toolDescriptions.push(CLICKUP_TOOL_DESCRIPTION);
         }
+        // Browser tool is always available
+        toolDescriptions.push(BROWSER_TOOL_DESCRIPTION);
 
         // Enhance system prompt with project context and tool descriptions
         let systemPrompt = agent.systemPrompt;
@@ -307,9 +312,17 @@ export async function POST(request: NextRequest) {
                 // Add GitHub tool if project has GitHub configured
                 if (project?.github) {
                     tools.github = {
-                        description: `Fetch information from the project's GitHub repository (${project.github.owner}/${project.github.repo}). Use to get issues, PRs, commits, or read files.`,
+                        description: `Interact with the project's GitHub repository (${project.github.owner}/${project.github.repo}). Use to get issues, PRs, commits, read files, or create new issues.`,
                         inputSchema: githubToolSchema,
-                        execute: async (args: { action: 'issues' | 'prs' | 'commits' | 'file'; query?: string; state?: 'open' | 'closed' | 'all'; limit?: number }) => {
+                        execute: async (args: {
+                            action: 'issues' | 'prs' | 'commits' | 'file' | 'create_issue';
+                            query?: string;
+                            state?: 'open' | 'closed' | 'all';
+                            limit?: number;
+                            title?: string;
+                            body?: string;
+                            labels?: string[];
+                        }) => {
                             return executeGitHubTool(args, project);
                         },
                     };
@@ -318,13 +331,38 @@ export async function POST(request: NextRequest) {
                 // Add ClickUp tool if project has ClickUp configured
                 if (project?.clickup) {
                     tools.clickup = {
-                        description: `Fetch tasks from the project's ClickUp list. Use to see current tasks and their status.`,
+                        description: `Manage tasks in the project's ClickUp list. Use to see tasks, get details, create new tasks, or update existing ones.`,
                         inputSchema: clickupToolSchema,
-                        execute: async (args: { action: 'tasks' | 'task_details'; taskId?: string; status?: string; limit?: number }) => {
+                        execute: async (args: {
+                            action: 'tasks' | 'task_details' | 'create_task' | 'update_task';
+                            taskId?: string;
+                            status?: string;
+                            limit?: number;
+                            name?: string;
+                            description?: string;
+                            priority?: number;
+                            dueDate?: string;
+                        }) => {
                             return executeClickUpTool(args, project);
                         },
                     };
                 }
+
+                // Add browser tool (always available for web research)
+                tools.browser = {
+                    description: `Browse the web to research documentation, search for solutions, or extract information from websites. Use when you need to look up technical info, find solutions, or gather data from the web.`,
+                    inputSchema: browserToolSchema,
+                    execute: async (args: {
+                        action: 'browse' | 'extract' | 'search';
+                        url?: string;
+                        query?: string;
+                        instruction?: string;
+                    }) => {
+                        // Get the base URL from the request
+                        const baseUrl = request.headers.get('origin') || 'http://localhost:3000';
+                        return executeBrowserTool(args, baseUrl);
+                    },
+                };
 
                 // Only pass tools if we have any
                 const toolsToUse = Object.keys(tools).length > 0 ? tools : undefined;

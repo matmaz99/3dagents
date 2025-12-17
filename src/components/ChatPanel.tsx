@@ -30,6 +30,37 @@ interface ChatPanelProps {
     project?: Project;
 }
 
+// Quick action button component
+interface QuickActionButtonProps {
+    label: string;
+    agentId: string;
+    message: string;
+    selectedAgent: AgentPersonality | null;
+    isLoading: boolean;
+    onAction: (agentId: string, message: string) => void;
+}
+
+function QuickActionButton({ label, agentId, message, selectedAgent, isLoading, onAction }: QuickActionButtonProps) {
+    const targetAgent = AGENT_PERSONALITIES.find(a => a.id === agentId);
+    const isActive = selectedAgent?.id === agentId;
+
+    return (
+        <button
+            onClick={() => onAction(agentId, message)}
+            disabled={isLoading}
+            className={`text-xs px-2 py-1 rounded-md transition-all disabled:opacity-50 disabled:cursor-not-allowed ${
+                isActive
+                    ? 'bg-gray-700 text-white'
+                    : 'bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200'
+            }`}
+            style={isActive && targetAgent ? { borderLeft: `2px solid ${targetAgent.colorHex}` } : {}}
+            title={`Ask ${targetAgent?.name || 'agent'}: ${message}`}
+        >
+            {label}
+        </button>
+    );
+}
+
 export function ChatPanel({ gameRef, project }: ChatPanelProps) {
     const [selectedAgent, setSelectedAgent] = useState<AgentPersonality | null>(null);
     const [messages, setMessages] = useState<Message[]>([]);
@@ -45,10 +76,24 @@ export function ChatPanel({ gameRef, project }: ChatPanelProps) {
     // Get project ID for memory scoping (fallback to 'default' for backward compatibility)
     const projectId = project?.id || 'default';
 
+    // Reset selected agent when project changes
+    const prevProjectIdRef = useRef(projectId);
+    useEffect(() => {
+        if (prevProjectIdRef.current !== projectId) {
+            // Project changed - reset agent selection and reload
+            setSelectedAgent(null);
+            setMessages([]);
+            setStreamingText('');
+            setStatusMessage(null);
+            prevProjectIdRef.current = projectId;
+        }
+    }, [projectId]);
+
     // Load conversation history when agent or project changes
     useEffect(() => {
         if (selectedAgent) {
             const history = memoryStore.getConversationHistory(projectId, selectedAgent.id);
+
             if (history.length === 0) {
                 // Add greeting (customize with project name if available)
                 const greeting = project
@@ -437,6 +482,80 @@ export function ChatPanel({ gameRef, project }: ChatPanelProps) {
                         )}
 
                         <div ref={messagesEndRef} />
+                    </div>
+
+                    {/* Quick Actions */}
+                    <div className="px-3 py-2 border-t border-gray-700/50">
+                        <div className="flex gap-1.5 flex-wrap">
+                            <QuickActionButton
+                                label="Sprint Status"
+                                agentId="product-owner"
+                                message="What's the current sprint status? Give me an overview of tasks, progress, and any blockers."
+                                selectedAgent={selectedAgent}
+                                isLoading={isLoading}
+                                onAction={(agentId, message) => {
+                                    const agent = AGENT_PERSONALITIES.find(a => a.id === agentId);
+                                    if (agent) {
+                                        setSelectedAgent(agent);
+                                        setTimeout(() => {
+                                            setInput(message);
+                                            inputRef.current?.focus();
+                                        }, 100);
+                                    }
+                                }}
+                            />
+                            <QuickActionButton
+                                label="Open Bugs"
+                                agentId="qa-engineer"
+                                message="What bugs are currently open? List them by severity and status."
+                                selectedAgent={selectedAgent}
+                                isLoading={isLoading}
+                                onAction={(agentId, message) => {
+                                    const agent = AGENT_PERSONALITIES.find(a => a.id === agentId);
+                                    if (agent) {
+                                        setSelectedAgent(agent);
+                                        setTimeout(() => {
+                                            setInput(message);
+                                            inputRef.current?.focus();
+                                        }, 100);
+                                    }
+                                }}
+                            />
+                            <QuickActionButton
+                                label="Recent Activity"
+                                agentId="tech-lead"
+                                message="What's the recent development activity? Show me the latest commits and PRs."
+                                selectedAgent={selectedAgent}
+                                isLoading={isLoading}
+                                onAction={(agentId, message) => {
+                                    const agent = AGENT_PERSONALITIES.find(a => a.id === agentId);
+                                    if (agent) {
+                                        setSelectedAgent(agent);
+                                        setTimeout(() => {
+                                            setInput(message);
+                                            inputRef.current?.focus();
+                                        }, 100);
+                                    }
+                                }}
+                            />
+                            <QuickActionButton
+                                label="Release Status"
+                                agentId="release-manager"
+                                message="What's the release status? Are we ready to deploy? Any pending items?"
+                                selectedAgent={selectedAgent}
+                                isLoading={isLoading}
+                                onAction={(agentId, message) => {
+                                    const agent = AGENT_PERSONALITIES.find(a => a.id === agentId);
+                                    if (agent) {
+                                        setSelectedAgent(agent);
+                                        setTimeout(() => {
+                                            setInput(message);
+                                            inputRef.current?.focus();
+                                        }, 100);
+                                    }
+                                }}
+                            />
+                        </div>
                     </div>
 
                     {/* Input */}

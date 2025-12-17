@@ -73,8 +73,8 @@ async function fetchClickUp(
 
 // GitHub Tool Schema
 export const githubToolSchema = z.object({
-    action: z.enum(['issues', 'prs', 'commits', 'file']).describe(
-        'What to fetch: issues, prs (pull requests), commits, or a specific file'
+    action: z.enum(['issues', 'prs', 'commits', 'file', 'create_issue']).describe(
+        'What to do: issues (list), prs (list), commits (list), file (read), or create_issue (create new issue)'
     ),
     query: z.string().optional().describe(
         'Optional search query or file path (for file action)'
@@ -84,6 +84,16 @@ export const githubToolSchema = z.object({
     ),
     limit: z.number().optional().describe(
         'Max number of results to return. Default: 10'
+    ),
+    // Fields for create_issue action
+    title: z.string().optional().describe(
+        'Issue title (required for create_issue action)'
+    ),
+    body: z.string().optional().describe(
+        'Issue body/description (for create_issue action)'
+    ),
+    labels: z.array(z.string()).optional().describe(
+        'Labels to add to the issue (for create_issue action). E.g., ["bug", "high-priority"]'
     ),
 });
 
@@ -214,6 +224,57 @@ export async function executeGitHubTool(
                 };
             }
 
+            case 'create_issue': {
+                if (!args.title) {
+                    return {
+                        success: false,
+                        error: 'Title required for create_issue action',
+                        summary: 'Missing issue title',
+                    };
+                }
+                if (!token) {
+                    return {
+                        success: false,
+                        error: 'GitHub token required to create issues',
+                        summary: 'GitHub token missing',
+                    };
+                }
+
+                const issueBody = {
+                    title: args.title,
+                    body: args.body || '',
+                    labels: args.labels || [],
+                };
+
+                const response = await fetch(`https://api.github.com/repos/${owner}/${repo}/issues`, {
+                    method: 'POST',
+                    headers: {
+                        'Accept': 'application/vnd.github.v3+json',
+                        'Authorization': `Bearer ${token}`,
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(issueBody),
+                });
+
+                if (!response.ok) {
+                    const errorData = await response.json().catch(() => ({}));
+                    throw new Error(`Failed to create issue: ${response.status} - ${errorData.message || 'Unknown error'}`);
+                }
+
+                const createdIssue = await response.json();
+
+                return {
+                    success: true,
+                    data: {
+                        number: createdIssue.number,
+                        title: createdIssue.title,
+                        url: createdIssue.html_url,
+                        state: createdIssue.state,
+                    },
+                    summary: `Created issue #${createdIssue.number}: "${args.title}" in ${owner}/${repo}`,
+                };
+            }
+
             default:
                 return {
                     success: false,
@@ -233,17 +294,30 @@ export async function executeGitHubTool(
 
 // ClickUp Tool Schema
 export const clickupToolSchema = z.object({
-    action: z.enum(['tasks', 'task_details']).describe(
-        'What to fetch: tasks (list all) or task_details (specific task)'
+    action: z.enum(['tasks', 'task_details', 'create_task', 'update_task']).describe(
+        'What to do: tasks (list all), task_details (get one), create_task (new task), update_task (modify existing)'
     ),
     taskId: z.string().optional().describe(
-        'Task ID (required for task_details action)'
+        'Task ID (required for task_details and update_task actions)'
     ),
     status: z.string().optional().describe(
-        'Filter by status name (for tasks action)'
+        'Filter by status name (for tasks action) or new status (for update_task action)'
     ),
     limit: z.number().optional().describe(
         'Max number of results. Default: 20'
+    ),
+    // Fields for create_task action
+    name: z.string().optional().describe(
+        'Task name (required for create_task action)'
+    ),
+    description: z.string().optional().describe(
+        'Task description (for create_task or update_task actions)'
+    ),
+    priority: z.number().min(1).max(4).optional().describe(
+        'Priority level 1-4 (1=urgent, 2=high, 3=normal, 4=low) for create_task or update_task'
+    ),
+    dueDate: z.string().optional().describe(
+        'Due date as ISO string or timestamp (for create_task or update_task)'
     ),
 });
 
@@ -332,6 +406,129 @@ export async function executeClickUpTool(
                 };
             }
 
+            case 'create_task': {
+                if (!args.name) {
+                    return {
+                        success: false,
+                        error: 'Task name required for create_task action',
+                        summary: 'Missing task name',
+                    };
+                }
+
+                const taskBody: Record<string, unknown> = {
+                    name: args.name,
+                    description: args.description || '',
+                };
+
+                if (args.priority) {
+                    taskBody.priority = args.priority;
+                }
+
+                if (args.dueDate) {
+                    // Convert to milliseconds timestamp if it's an ISO string
+                    const dueTimestamp = isNaN(Number(args.dueDate))
+                        ? new Date(args.dueDate).getTime()
+                        : Number(args.dueDate);
+                    taskBody.due_date = dueTimestamp;
+                }
+
+                const response = await fetch(`https://api.clickup.com/api/v2/list/${listId}/task`, {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': token,
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(taskBody),
+                });
+
+                if (!response.ok) {
+                    const errorData = await response.json().catch(() => ({}));
+                    throw new Error(`Failed to create task: ${response.status} - ${errorData.err || 'Unknown error'}`);
+                }
+
+                const createdTask = await response.json();
+
+                return {
+                    success: true,
+                    data: {
+                        id: createdTask.id,
+                        name: createdTask.name,
+                        url: createdTask.url,
+                        status: createdTask.status?.status || 'created',
+                    },
+                    summary: `Created task "${args.name}" in ClickUp (ID: ${createdTask.id})`,
+                };
+            }
+
+            case 'update_task': {
+                if (!args.taskId) {
+                    return {
+                        success: false,
+                        error: 'Task ID required for update_task action',
+                        summary: 'Missing task ID',
+                    };
+                }
+
+                const updateBody: Record<string, unknown> = {};
+
+                if (args.name) {
+                    updateBody.name = args.name;
+                }
+
+                if (args.description) {
+                    updateBody.description = args.description;
+                }
+
+                if (args.status) {
+                    updateBody.status = args.status;
+                }
+
+                if (args.priority) {
+                    updateBody.priority = args.priority;
+                }
+
+                if (args.dueDate) {
+                    const dueTimestamp = isNaN(Number(args.dueDate))
+                        ? new Date(args.dueDate).getTime()
+                        : Number(args.dueDate);
+                    updateBody.due_date = dueTimestamp;
+                }
+
+                if (Object.keys(updateBody).length === 0) {
+                    return {
+                        success: false,
+                        error: 'At least one field to update is required',
+                        summary: 'No updates specified',
+                    };
+                }
+
+                const response = await fetch(`https://api.clickup.com/api/v2/task/${args.taskId}`, {
+                    method: 'PUT',
+                    headers: {
+                        'Authorization': token,
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(updateBody),
+                });
+
+                if (!response.ok) {
+                    const errorData = await response.json().catch(() => ({}));
+                    throw new Error(`Failed to update task: ${response.status} - ${errorData.err || 'Unknown error'}`);
+                }
+
+                const updatedTask = await response.json();
+
+                return {
+                    success: true,
+                    data: {
+                        id: updatedTask.id,
+                        name: updatedTask.name,
+                        status: updatedTask.status?.status,
+                    },
+                    summary: `Updated task "${updatedTask.name}" (ID: ${args.taskId})`,
+                };
+            }
+
             default:
                 return {
                     success: false,
@@ -349,22 +546,118 @@ export async function executeClickUpTool(
     }
 }
 
+// Browser Tool Schema
+export const browserToolSchema = z.object({
+    action: z.enum(['browse', 'extract', 'search']).describe(
+        'What to do: browse (visit URL and get content), extract (get specific data), search (Google search)'
+    ),
+    url: z.string().optional().describe(
+        'URL to visit (required for browse and extract actions)'
+    ),
+    query: z.string().optional().describe(
+        'Search query (required for search action)'
+    ),
+    instruction: z.string().optional().describe(
+        'What specific information to extract or look for on the page'
+    ),
+});
+
+export type BrowserToolArgs = z.infer<typeof browserToolSchema>;
+
+// Browser Tool Execute
+export async function executeBrowserTool(
+    args: BrowserToolArgs,
+    baseUrl: string
+): Promise<{ success: boolean; data?: unknown; error?: string; summary: string }> {
+    try {
+        const response = await fetch(`${baseUrl}/api/browser`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(args),
+        });
+
+        if (!response.ok) {
+            const errorData = await response.json().catch(() => ({}));
+            throw new Error(errorData.error || `Browser API error: ${response.status}`);
+        }
+
+        const result = await response.json();
+
+        if (!result.success) {
+            return {
+                success: false,
+                error: result.error || 'Unknown browser error',
+                summary: 'Browser operation failed',
+            };
+        }
+
+        // Create a summary based on the action
+        let summary = '';
+        switch (args.action) {
+            case 'browse':
+                summary = `Browsed to ${args.url} - ${result.data?.title || 'Page loaded'}`;
+                break;
+            case 'extract':
+                summary = `Extracted data from ${args.url}`;
+                break;
+            case 'search':
+                const resultCount = result.data?.results?.length || 0;
+                summary = `Found ${resultCount} search results for "${args.query}"`;
+                break;
+            default:
+                summary = 'Browser operation completed';
+        }
+
+        return {
+            success: true,
+            data: result.data,
+            summary,
+        };
+    } catch (error) {
+        const message = error instanceof Error ? error.message : 'Unknown error';
+        return {
+            success: false,
+            error: message,
+            summary: `Browser error: ${message}`,
+        };
+    }
+}
+
 // Tool descriptions for agent system prompts
 export const GITHUB_TOOL_DESCRIPTION = `
-You have access to a GitHub tool to fetch information from the project's repository.
+You have access to a GitHub tool to interact with the project's repository.
 Use it when you need to:
 - Check open issues or PRs
 - Look at recent commits
 - Read a specific file from the repo
+- Create a new issue (for bug reports, feature requests, etc.)
 
-Actions available: issues, prs, commits, file
+Actions available: issues, prs, commits, file, create_issue
 `;
 
 export const CLICKUP_TOOL_DESCRIPTION = `
-You have access to a ClickUp tool to fetch tasks from the project's task list.
+You have access to a ClickUp tool to manage tasks in the project's task list.
 Use it when you need to:
 - See current tasks and their status
 - Get details about a specific task
+- Create a new task
+- Update an existing task (status, priority, description)
 
-Actions available: tasks, task_details
+Actions available: tasks, task_details, create_task, update_task
+`;
+
+export const BROWSER_TOOL_DESCRIPTION = `
+You have access to a Browser tool to browse the web and gather information.
+Use it when you need to:
+- Research technical documentation or solutions
+- Look up information from websites
+- Search Google for answers or resources
+- Extract specific data from web pages
+
+Actions available:
+- browse: Visit a URL and extract its main content
+- extract: Get specific information from a page (provide instruction for what to extract)
+- search: Perform a Google search and get results
 `;

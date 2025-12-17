@@ -13,6 +13,8 @@ export interface AgentMemory {
 }
 
 const MEMORY_KEY = 'ai-town-memories';
+const MEMORY_VERSION_KEY = 'ai-town-memory-version';
+const CURRENT_VERSION = 2; // Increment this when agent IDs change
 const MAX_MESSAGES_PER_AGENT = 20;
 
 // Create a composite key for project+agent
@@ -24,7 +26,30 @@ class MemoryStore {
     private memories: Map<string, AgentMemory> = new Map();
 
     constructor() {
-        this.loadFromStorage();
+        this.checkVersionAndLoad();
+    }
+
+    private checkVersionAndLoad(): void {
+        if (typeof window === 'undefined') return;
+
+        try {
+            // Check if memory version matches current version
+            const storedVersion = localStorage.getItem(MEMORY_VERSION_KEY);
+            const version = storedVersion ? parseInt(storedVersion, 10) : 0;
+
+            if (version < CURRENT_VERSION) {
+                // Version mismatch - clear old data (agent IDs changed)
+                console.log('Memory version mismatch, clearing old conversation data');
+                localStorage.removeItem(MEMORY_KEY);
+                localStorage.setItem(MEMORY_VERSION_KEY, CURRENT_VERSION.toString());
+                return;
+            }
+
+            // Load existing data
+            this.loadFromStorage();
+        } catch (e) {
+            console.warn('Failed to check memory version:', e);
+        }
     }
 
     private loadFromStorage(): void {

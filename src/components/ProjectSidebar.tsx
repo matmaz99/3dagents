@@ -31,7 +31,7 @@ export function ProjectSidebar({
 
     if (isCollapsed) {
         return (
-            <div className="w-12 h-full bg-gray-900 border-r border-gray-700 flex flex-col items-center py-3">
+            <div className="w-12 h-full bg-gray-900 border-r border-gray-700 flex flex-col items-center py-3 relative z-50">
                 <button
                     onClick={() => setIsCollapsed(false)}
                     className="w-8 h-8 rounded-lg bg-gray-800 hover:bg-gray-700 flex items-center justify-center text-gray-400 hover:text-white transition-colors"
@@ -46,8 +46,13 @@ export function ProjectSidebar({
                     {projects.map(project => (
                         <button
                             key={project.id}
-                            onClick={() => onSelectProject(project)}
-                            className={`w-8 h-8 rounded-lg flex items-center justify-center transition-all ${
+                            type="button"
+                            onClick={(e) => {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                onSelectProject(project);
+                            }}
+                            className={`w-8 h-8 rounded-lg flex items-center justify-center transition-all cursor-pointer ${
                                 activeProjectId === project.id
                                     ? 'ring-2 ring-white/50'
                                     : 'hover:ring-1 hover:ring-gray-600'
@@ -76,7 +81,7 @@ export function ProjectSidebar({
     }
 
     return (
-        <div className="w-56 h-full bg-gray-900 border-r border-gray-700 flex flex-col">
+        <div className="w-56 h-full bg-gray-900 border-r border-gray-700 flex flex-col relative z-50">
             {/* Header */}
             <div className="flex items-center justify-between p-3 border-b border-gray-700">
                 <h2 className="text-white font-semibold text-sm">Projects</h2>
@@ -96,8 +101,13 @@ export function ProjectSidebar({
                 {projects.map(project => (
                     <button
                         key={project.id}
-                        onClick={() => onSelectProject(project)}
-                        className={`w-full p-2 rounded-lg text-left transition-all ${
+                        type="button"
+                        onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            onSelectProject(project);
+                        }}
+                        className={`w-full p-2 rounded-lg text-left transition-all cursor-pointer ${
                             activeProjectId === project.id
                                 ? 'bg-gray-800 ring-1 ring-gray-600'
                                 : 'hover:bg-gray-800/50'
